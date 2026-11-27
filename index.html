@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Монитор</title>
+<style>
+  :root {
+    --bg: #0f1216; --card: #1a1f26; --line: #2a313b; --text: #e8ecf1;
+    --muted: #8b96a5; --green: #3ccf6e; --red: #ff5a5f; --yellow: #f5c542; --accent: #3d8bfd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+  .wrap { max-width: 460px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  h1 { font-size: 22px; margin: 0; }
+  .conn { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--green); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 6px 16px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .row span:first-child { color: var(--muted); }
+  .row span:last-child { text-align: right; font-weight: 600; }
+  .g { color: var(--green); } .r { color: var(--red); } .y { color: var(--yellow); }
+  .btns { display: grid; gap: 10px; margin-top: 14px; }
+  button {
+    font: inherit; font-weight: 600; color: var(--text); background: var(--card);
+    border: 1px solid var(--line); border-radius: 12px; padding: 14px; cursor: pointer;
+  }
+  button:active { transform: scale(0.99); }
+  button:disabled { opacity: 0.45; }
+  .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .msg { min-height: 22px; margin-top: 12px; text-align: center; color: var(--yellow); font-size: 14px; }
+  .pin { display: flex; gap: 10px; align-items: center; margin-top: 16px; color: var(--muted); font-size: 14px; }
+  .pin input {
+    flex: 1; font: inherit; color: var(--text); background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Монитор</h1>
+    <div class="conn"><span class="dot" id="dot"></span><span id="connText">не подключено</span></div>
+  </header>
+
+  <button class="primary" id="connectBtn" style="width:100%;margin-bottom:14px">Подключиться по Bluetooth</button>
+
+  <div class="card">
+    <div class="row"><span>Время</span><span id="time">—</span></div>
+    <div class="row"><span>Сеть</span><span id="grid">—</span></div>
+    <div class="row"><span>Питание квартиры</span><span id="power">—</span></div>
+    <div class="row"><span>Емкость батарей</span><span id="soc">—</span></div>
+    <div class="row"><span>Ток батареи</span><span id="cur">—</span></div>
+    <div class="row"><span id="remL">Оставшееся время</span><span id="remV">—</span></div>
+    <div class="row"><span>Вводной автомат</span><span id="brk">—</span></div>
+  </div>
+
+  <div class="btns">
+    <button id="bOn" data-cmd="on" disabled>Включить</button>
+    <button id="bAg" data-cmd="auto_grid" disabled>❌ Авто: на сеть</button>
+    <button id="bAi" data-cmd="auto_inv" disabled>❌ Авто: на инвертор</button>
+  </div>
+
+  <div class="msg" id="msg"></div>
+
+  <label class="pin">PIN
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN из прошивки">
+  </label>
+
+  <div class="hint">Откройте эту страницу в браузере Bluefy. Телефон должен быть рядом с монитором.</div>
+</div>
+
+<script>
+const SVC    = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const CMD    = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const STATUS = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+const $ = id => document.getElementById(id);
+let device = null, statusChar = null, cmdChar = null;
+let queue = Promise.resolve();   // операции Bluetooth строго по одной
+let readPending = false;
+
+// PIN запоминается в этом браузере
+try { $('pin').value = localStorage.getItem('monitorPin') || ''; } catch (e) {}
+$('pin').addEventListener('change', () => {
+  try { localStorage.setItem('monitorPin', $('pin').value); } catch (e) {}
+});
+
+function enqueue(fn) {
+  queue = queue.then(fn, fn).catch(err => console.warn(err));
+  return queue;
+}
+
+function setConnected(on) {
+  $('dot').classList.toggle('on', on);
+  $('connText').textContent = on ? 'подключено' : 'не подключено';
+  $('connectBtn').textContent = on ? 'Отключиться' : 'Подключиться по Bluetooth';
+  document.querySelectorAll('[data-cmd]').forEach(b => b.disabled = !on);
+}
+
+function show(s) {
+  $('time').textContent = s.time || '—';
+
+  const grid = s.grid === 1 ? ['🟢 есть', 'g'] : s.grid === 0 ? ['🔴 нет', 'r'] : ['⚪ нет данных', ''];
+  const power = s.grid === 1 ? ['🟢 От сети', 'g'] : s.grid === 0 ? ['🟡 От батарей', 'y'] : ['⚪ нет данных', ''];
+  $('grid').textContent = grid[0];  $('grid').className = grid[1];
+  $('power').textContent = power[0]; $('power').className = power[1];
+
+  if (s.bat) {
+    $('soc').textContent = s.soc + '%';
+    $('cur').textContent = s.cur;
+    $('remL').textContent = s.remL;
+    $('remV').textContent = s.remV;
+  } else {
+    $('soc').textContent = 'нет данных';
+    $('cur').textContent = 'нет данных';
+    $('remL').textContent = 'Оставшееся время';
+    $('remV').textContent = '—';
+  }
+  $('brk').textContent = s.brk || '—';
+
+  $('bAg').textContent = (s.ag ? '✅' : '❌') + ' Авто: на сеть';
+  $('bAi').textContent = (s.ai ? '✅' : '❌') + ' Авто: на инвертор';
+  $('msg').textContent = s.msg || '';
+}
+
+// Уведомление может прийти обрезанным, поэтому читаем значение целиком
+function refresh() {
+  if (!statusChar || readPending) return;
+  readPending = true;
+  enqueue(async () => {
+    try {
+      const v = await statusChar.readValue();
+      show(JSON.parse(new TextDecoder().decode(v)));
+    } finally {
+      readPending = false;
+    }
+  });
+}
+
+async function connect() {
+  device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+  device.addEventListener('gattserverdisconnected', onDisconnected);
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  statusChar = await svc.getCharacteristic(STATUS);
+  cmdChar = await svc.getCharacteristic(CMD);
+  await statusChar.startNotifications();
+  statusChar.addEventListener('characteristicvaluechanged', refresh);
+  setConnected(true);
+  refresh();
+}
+
+function onDisconnected() {
+  statusChar = null; cmdChar = null;
+  setConnected(false);
+  $('msg').textContent = 'Связь потеряна';
+}
+
+$('connectBtn').addEventListener('click', async () => {
+  if (device && device.gatt.connected) { device.gatt.disconnect(); return; }
+  if (!navigator.bluetooth) {
+    $('msg').textContent = 'Этот браузер не умеет Bluetooth. Откройте страницу в Bluefy.';
+    return;
+  }
+  try {
+    $('msg').textContent = '';
+    await connect();
+  } catch (e) {
+    $('msg').textContent = 'Не удалось подключиться: ' + e.message;
+  }
+});
+
+document.querySelectorAll('[data-cmd]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (!cmdChar) return;
+    const pin = $('pin').value.trim();
+    if (!pin) { $('msg').textContent = 'Введите PIN внизу страницы'; return; }
+    try { localStorage.setItem('monitorPin', pin); } catch (e) {}
+    const data = new TextEncoder().encode(btn.dataset.cmd + ' ' + pin);
+    enqueue(() => cmdChar.writeValue(data));
+  });
+});
+</script>
+</body>
+</html>
